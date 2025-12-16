@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Helia PubSub Chat</title>
+    <style>
+      /* Basic styling for clarity */
+      body { 
+        font-family: sans-serif; 
+        max-width: 800px; 
+        margin: 0 auto; 
+        padding: 20px; 
+        background-color: #f9f9f9;
+      }
+      #app-container { 
+        border: 1px solid #ccc; 
+        padding: 20px; 
+        border-radius: 8px; 
+        background-color: #fff;
+      }
+      #input-area {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 20px;
+        padding-bottom: 15px;
+        border-bottom: 1px solid #eee;
+      }
+      #input-area.started { 
+        /* This hides the input/start button after the node connects */
+        display: none; 
+      }
+      .info-box { 
+        border: 1px dashed #ddd; 
+        padding: 10px; 
+        margin-top: 10px; 
+        font-size: 0.9em; 
+        word-break: break-all;
+      }
+      .info-box p { margin: 5px 0; }
+      h3 { margin-top: 30px; border-bottom: 1px solid #eee; padding-bottom: 5px; color: #333; }
+      .join-message { font-weight: bold; color: green; }
+      #messages, #online-users-list { list-style: none; padding: 0; max-height: 200px; overflow-y: auto; }
+      #online-users-list li { padding: 5px 0; border-bottom: 1px dotted #eee; }
+      #status { font-weight: bold; }
+    </style>
+  </head>
+  <body>
+    <h1>Helia Browser PubSub Monitor</h1>
+    <p>Decentralized user presence monitoring via libp2p GossipSub.</p>
+
+    <div id="app-container">
+      
+      <div id="input-area">
+        <label for="user-name-input">Enter User Name:</label>
+        <input type="text" id="user-name-input" placeholder="Your Name" />
+        <button id="start-helia">Start Node & Join Channel</button>
+      </div>
+
+      <div id="status-panel">
+        <p>Connection Status: <span id="status">Offline</span></p>
+        <div class="info-box">
+          <p>User: <strong id="user-name">N/A</strong></p>
+          <p>Node ID: <code id="node-id">N/A</code></p>
+        </div>
+      </div>
+
+      <hr>
+
+      <div class="online-list-panel">
+        <h3>Online Users (Last Announcement Received)</h3>
+        <ul id="online-users-list">
+          <li>Waiting for node to start...</li>
+        </ul>
+      </div>
+
+      <div class="messages-panel">
+        <h3>Channel Messages (Presence Announcements)</h3>
+        <ul id="messages">
+          <li>Messages from the channel will appear here.</li>
+        </ul>
+      </div>
+      
+    </div>
+
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>
