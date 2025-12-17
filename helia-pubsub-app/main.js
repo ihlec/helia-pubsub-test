@@ -6,24 +6,22 @@ import { yamux } from '@chainsafe/libp2p-yamux'
 import { bootstrap } from '@libp2p/bootstrap'
 import { identify } from '@libp2p/identify'
 import { kadDHT } from '@libp2p/kad-dht'
-import { ping } from '@libp2p/ping' // 📦 NEW IMPORT
+import { ping } from '@libp2p/ping'
+import { circuitRelayTransport } from '@libp2p/circuit-relay-v2' 
+import { dcutr } from '@libp2p/dcutr' 
 import { ipns } from '@helia/ipns'
+import { ipnsValidator, ipnsSelector } from '@helia/ipns'
 import { strings } from '@helia/strings'
 import { generateKeyPairFromSeed } from '@libp2p/crypto/keys'
 import { fromString } from 'uint8arrays/from-string'
 import { keychain } from '@libp2p/keychain'
 import { peerIdFromPrivateKey } from '@libp2p/peer-id'
+import { pubsubPeerDiscovery } from '@libp2p/pubsub-peer-discovery'
 
 // --- CONFIGURATION ---
 
 const SHARED_KEY_STRING = 'TL+0YBiCedGwobNXEIr47PEIN0/HmUHtwYK9x4W1mjg=' 
 const SHARED_KEY_ALIAS = 'shared-registry-key'
-
-const GATEWAYS = [
-    'https://ipfs.io/ipns/',
-    'https://dweb.link/ipns/',
-    'https://cloudflare-ipfs.com/ipns/'
-];
 
 const KEYCHAIN_CONFIG = {
   pass: 'my-secure-registry-password-123',
@@ -35,6 +33,7 @@ const KEYCHAIN_CONFIG = {
   }
 }
 
+// Robust Bootstrap List (Reliable Relay V2 Nodes)
 const BOOTSTRAP_NODES = [
   '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
   '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb',
@@ -53,21 +52,41 @@ async function startHelia(userName) {
 
   // A. Libp2p Configuration
   const libp2pConfig = {
-    addresses: { listen: [] },
-    transports: [ webSockets() ],
+    addresses: { 
+        listen: [] 
+    },
+    transports: [ 
+        webSockets(),
+        // 🟢 ENABLE CIRCUIT RELAY (Updated Config)
+        circuitRelayTransport({ 
+            discoverRelays: 2 // Try to find at least 2 relays
+        })
+    ],
+    // 🟢 KEEP ALIVE: Force node to maintain connections
+    connectionManager: {
+        minConnections: 2
+    },
     connectionEncrypters: [ noise() ],
     streamMuxers: [ yamux() ],
-    peerDiscovery: [ bootstrap({ list: BOOTSTRAP_NODES }) ],
+    peerDiscovery: [ 
+        bootstrap({ list: BOOTSTRAP_NODES }),
+        pubsubPeerDiscovery({
+            interval: 10000,
+            listenOnly: false
+        })
+    ],
     services: {
-      // 📡 DHT ENABLED
+      dcutr: dcutr(),
       dht: kadDHT({
         clientMode: true,
-        protocol: '/ipfs/kad/1.0.0'
+        protocol: '/ipfs/kad/1.0.0',
+        validators: { ipns: ipnsValidator },
+        selectors: { ipns: ipnsSelector }
       }),
-      
-      // 🏓 PING ENABLED (Required by DHT)
       ping: ping(),
-
+      identify: identify(),
+      pubsub: gossipsub({ allowPublishToZeroPeers: true }),
+      
       keychain: (components) => {
           const originalKeychain = keychain(KEYCHAIN_CONFIG)(components);
           return {
@@ -88,8 +107,6 @@ async function startHelia(userName) {
               rotateKeychainPass: originalKeychain.rotateKeychainPass.bind(originalKeychain)
           }
       },
-      identify: identify(),
-      pubsub: gossipsub({ allowPublishToZeroPeers: true })
     }
   }
 
@@ -102,29 +119,44 @@ async function startHelia(userName) {
   const peerId = helia.libp2p.peerId.toString()
   console.log(`Helia started. My Peer ID: ${peerId}`)
 
-  // --- D. IMPORT THE SHARED KEY ---
+  // --- C. IMPORT & VALIDATE SHARED KEY ---
   let sharedPeerId;
   
   try {
-    const myKeychain = helia.libp2p.services.keychain
+    const myKeychain = helia.libp2p.services.keychain;
     
-    // 1. Check if key exists
-    const keys = await myKeychain.listKeys()
-    const alreadyExists = keys.some(k => k.name === SHARED_KEY_ALIAS)
+    // 1. Generate expected key from seed
+    const seedBytes = fromString(SHARED_KEY_STRING, 'base64pad');
+    const expectedKey = await generateKeyPairFromSeed('Ed25519', seedBytes);
+    const expectedPeerId = peerIdFromPrivateKey(expectedKey);
+    
+    // 2. Check if we have a key stored already
+    const keys = await myKeychain.listKeys();
+    const existingKeyRef = keys.find(k => k.name === SHARED_KEY_ALIAS);
 
-    if (!alreadyExists) {
-      console.log("Importing shared key...")
-      const seedBytes = fromString(SHARED_KEY_STRING, 'base64pad')
-      const privateKey = await generateKeyPairFromSeed('Ed25519', seedBytes)
-      await myKeychain.importKey(SHARED_KEY_ALIAS, privateKey)
+    if (existingKeyRef) {
+        // 🟢 CRITICAL: Verify stored key matches seed
+        const storedKey = await myKeychain.exportKey(SHARED_KEY_ALIAS);
+        const storedPeerId = peerIdFromPrivateKey(storedKey);
+
+        if (storedPeerId.toString() !== expectedPeerId.toString()) {
+            console.warn("⚠️ Stored key mismatch! Overwriting with correct Seed Key...");
+            await myKeychain.removeKey(SHARED_KEY_ALIAS);
+            await myKeychain.importKey(SHARED_KEY_ALIAS, expectedKey);
+        } else {
+            console.log("✅ Stored key verified (Matches Seed).");
+        }
+    } else {
+        console.log("🆕 Importing new shared key from seed...");
+        await myKeychain.importKey(SHARED_KEY_ALIAS, expectedKey);
     }
 
-    // 2. Retrieve key
-    const storedPrivateKey = await myKeychain.exportKey(SHARED_KEY_ALIAS)
+    // 3. Final Retrieve
+    const finalKey = await myKeychain.exportKey(SHARED_KEY_ALIAS);
+    sharedPeerId = peerIdFromPrivateKey(finalKey);
     
-    sharedPeerId = peerIdFromPrivateKey(storedPrivateKey)
-    if (storedPrivateKey.bytes) {
-        sharedPeerId.privateKey = storedPrivateKey.bytes
+    if (finalKey.bytes) {
+        sharedPeerId.privateKey = finalKey.bytes
     }
 
     console.log("--------------------------------------------------")
@@ -137,7 +169,8 @@ async function startHelia(userName) {
     document.getElementById('user-name').textContent = userName
     document.getElementById('status').textContent = 'Connected (Scanning Registry...)'
 
-    startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName)
+    // Start Loops
+    startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName, helia)
     startNetworkMonitor(helia)
 
   } catch (e) {
@@ -148,6 +181,167 @@ async function startHelia(userName) {
   return { helia }
 }
 
+/**
+ * 🛠️ DEBUG PANEL
+ */
+function updateDebugPanel(info) {
+    let el = document.getElementById('debug-panel');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'debug-panel';
+        el.style = "background: #222; color: #0f0; padding: 10px; margin-top: 20px; font-family: monospace; font-size: 11px; white-space: pre-wrap; border: 1px solid #444;";
+        document.getElementById('app-container').appendChild(el);
+    }
+    
+    el.textContent = `--- 🛠️ IPNS STATE DEBUG ---
+Target PeerID: ${info.peerId || '...'}
+Last Resolved CID: ${info.cid || 'Waiting...'}
+Record Sequence #: ${info.seq || 'Unknown'} (Higher is newer)
+Total Known Users: ${info.userCount || 0}
+Last Action: ${info.status || 'Idle'}
+---------------------------`;
+}
+
+/**
+ * 🔄 MAIN REGISTRY LOOP
+ */
+async function startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName, helia) {
+  
+  let lastPublishTime = 0;
+  const PUBLISH_COOLDOWN = 60 * 1000; 
+  let knownUsers = new Map();
+  
+  let debugState = {
+      peerId: sharedPeerId.toString().slice(-8), 
+      cid: "Not resolved yet",
+      seq: "N/A",
+      userCount: 0,
+      status: "Initializing..."
+  };
+
+  const updateRegistry = async () => {
+    const statusEl = document.getElementById('status');
+    debugState.status = "1. Resolving IPNS...";
+    updateDebugPanel(debugState);
+
+    try {
+      // --- STEP 1: RESOLVE ---
+      let remoteUsers = [];
+      let source = "None";
+
+      try {
+        console.log("🔍 [Debug] Resolving IPNS...");
+        
+        const result = await nameSystem.resolve(sharedPeerId, { 
+             signal: AbortSignal.timeout(60000) 
+        });
+
+        debugState.cid = result.cid.toString();
+        debugState.status = "2. Fetching JSON...";
+        updateDebugPanel(debugState);
+
+        const jsonStr = await jsonStorage.get(result.cid);
+        remoteUsers = JSON.parse(jsonStr);
+        source = "DHT";
+        
+        console.log(`✅ [Debug] Resolved CID: ${result.cid.toString()} | Users: ${remoteUsers.length}`);
+        debugState.seq = "(Resolved)"; 
+
+      } catch (err) {
+         console.warn("⚠️ [Debug] Resolve Failed:", err.message);
+         debugState.status = "Resolve Failed (Network empty or slow?)";
+      }
+
+      // --- STEP 2: MERGE ---
+      if (remoteUsers.length > 0) {
+          remoteUsers.forEach(user => {
+            // No timestamps, just names
+            if (!knownUsers.has(user.name)) {
+                console.log(`👋 [Debug] Discovered new user: ${user.name}`);
+                knownUsers.set(user.name, { name: user.name });
+            }
+          });
+      }
+
+      // Add Self (Without Timestamp -> Persistent CID)
+      knownUsers.set(userName, { name: userName });
+      
+      // Sort alphabetically to ensure JSON string is always identical
+      const userList = Array.from(knownUsers.values()).sort((a, b) => a.name.localeCompare(b.name));
+      
+      renderUserList(userList);
+      debugState.userCount = userList.length;
+      updateDebugPanel(debugState);
+
+      // --- STEP 3: PUBLISH DECISION ---
+      const timeSinceLastPublish = Date.now() - lastPublishTime;
+      
+      if (source === "None" && userList.length > 1) {
+          debugState.status = "🛑 Publish Skipped (Unsynced)";
+          updateDebugPanel(debugState);
+          return;
+      }
+
+      if (timeSinceLastPublish < PUBLISH_COOLDOWN) {
+          const timeLeft = Math.ceil((PUBLISH_COOLDOWN - timeSinceLastPublish) / 1000);
+          debugState.status = `Idle (Cooldown: ${timeLeft}s)`;
+          updateDebugPanel(debugState);
+          return;
+      }
+
+      // --- STEP 4: PUBLISH ---
+      debugState.status = "3. Publishing...";
+      updateDebugPanel(debugState);
+      statusEl.textContent = 'Publishing to Network...';
+      
+      const newJson = JSON.stringify(userList);
+      const newCid = await jsonStorage.add(newJson);
+      
+      // Check if CID Changed
+      if (debugState.cid === newCid.toString()) {
+           console.log("ℹ️ Content matches network. Publishing 'Liveness' update (re-signing same data).");
+      }
+      
+      console.log(`📤 [Debug] Publishing content CID: ${newCid}`);
+      
+      try {
+        for await (const _ of helia.libp2p.services.dht.provide(newCid)) {} 
+        console.log("📢 [Debug] Manually provided CID to DHT");
+      } catch (e) {}
+
+      const publishResult = await nameSystem.publish(sharedPeerId, newCid, {
+          key: SHARED_KEY_ALIAS,
+          signal: AbortSignal.timeout(90000) 
+      });
+      
+      if (publishResult && publishResult.sequence) {
+          debugState.seq = publishResult.sequence.toString();
+          console.log(`🚀 [Debug] Publish Success! Seq: ${publishResult.sequence}`);
+      } else {
+           debugState.seq = "Published (Unknown Seq)";
+      }
+      
+      lastPublishTime = Date.now();
+      debugState.status = "✅ Synced & Published";
+      debugState.cid = newCid.toString();
+      updateDebugPanel(debugState);
+      statusEl.textContent = 'Online & Synced';
+
+    } catch (e) {
+      console.error("❌ Registry Loop Critical Error:", e);
+      debugState.status = `Error: ${e.message}`;
+      updateDebugPanel(debugState);
+      statusEl.textContent = 'Retrying...';
+    }
+  }
+
+  updateRegistry();
+  setInterval(updateRegistry, 30000);
+}
+
+/**
+ * 📊 MONITOR (Fixed to show actual Relay Status)
+ */
 function startNetworkMonitor(helia) {
     const el = document.createElement('div');
     el.id = 'network-stats';
@@ -156,134 +350,25 @@ function startNetworkMonitor(helia) {
 
     setInterval(() => {
         const peers = helia.libp2p.getPeers();
+        const connections = helia.libp2p.getConnections();
+        
+        // Correct way to count relay connections
+        const relayConns = connections.filter(conn => 
+            conn.remoteAddr.toString().includes('circuit')
+        );
+
+        // Check if we are listening (have a multiaddr)
+        const multiaddrs = helia.libp2p.getMultiaddrs();
+        const isListening = multiaddrs.length > 0;
+        
         el.innerHTML = `
             <strong>Network Diagnostics:</strong><br>
             Connected Peers: ${peers.length}<br>
-            DHT Mode: Client (Ping + DHT Active)<br>
-            <em>(Wait 3-5 mins after "Record Announced" for Gateways to update)</em>
+            Relay Connections: ${relayConns.length}<br>
+            <strong>Public Status: ${isListening ? "🟢 Reachable (Listening)" : "🔴 Unreachable (NAT)"}</strong><br>
+            <em>(Your Address: ${isListening ? "Yes (via Relay)" : "None"})</em>
         `;
     }, 2000);
-}
-
-async function fetchFromGateway(peerId) {
-    const pidString = peerId.toCID().toString();
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000); 
-
-    for (const gateway of GATEWAYS) {
-        try {
-            let url;
-            if (gateway.includes('dweb.link')) {
-                 url = `https://${pidString}.ipns.dweb.link`;
-            } else {
-                 url = `${gateway}${pidString}`;
-            }
-
-            const response = await fetch(url, { signal: controller.signal });
-            if (!response.ok) throw new Error(`Status ${response.status}`);
-            
-            const data = await response.json();
-            clearTimeout(timeoutId);
-            return { data, source: gateway };
-        } catch (e) { }
-    }
-    clearTimeout(timeoutId);
-    return null;
-}
-
-async function startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName) {
-  
-  let lastPublishTime = 0;
-  const PUBLISH_COOLDOWN = 300 * 1000; // 5 Minutes
-  
-  let knownUsers = new Map();
-
-  const updateRegistry = async () => {
-    console.log("⌛ Checking registry...")
-    const statusEl = document.getElementById('status')
-    
-    try {
-      // 1. RESOLVE
-      let remoteUsers = [];
-      let source = "None";
-
-      const gatewayResult = await fetchFromGateway(sharedPeerId);
-      if (gatewayResult && Array.isArray(gatewayResult.data)) {
-          remoteUsers = gatewayResult.data;
-          source = `HTTP (${new URL(gatewayResult.source || 'http://gateway').hostname})`;
-      } else {
-          try {
-            const result = await nameSystem.resolve(sharedPeerId)
-            const jsonStr = await jsonStorage.get(result.cid)
-            remoteUsers = JSON.parse(jsonStr)
-            source = "Local DHT";
-          } catch (err) {}
-      }
-
-      if (source !== "None") {
-        console.log(`📥 Downloaded registry from [${source}] with ${remoteUsers.length} users.`);
-      }
-
-      // 2. MERGE
-      remoteUsers.forEach(user => {
-          if (!knownUsers.has(user.name)) {
-              knownUsers.set(user.name, user);
-          } else {
-              const localUser = knownUsers.get(user.name);
-              if (user.lastSeen > localUser.lastSeen) {
-                  knownUsers.set(user.name, user);
-              }
-          }
-      });
-
-      // 3. CLEANUP
-      const fifteenMinsAgo = Date.now() - (15 * 60 * 1000);
-      for (const [key, user] of knownUsers) {
-          if (user.lastSeen < fifteenMinsAgo) {
-              knownUsers.delete(key);
-          }
-      }
-
-      // 4. HEARTBEAT
-      knownUsers.set(userName, { 
-          name: userName, 
-          lastSeen: Date.now() 
-      });
-
-      const userList = Array.from(knownUsers.values());
-      renderUserList(userList);
-
-
-      // 5. PUBLISH
-      const timeSinceLastPublish = Date.now() - lastPublishTime;
-      const timeLeft = Math.ceil((PUBLISH_COOLDOWN - timeSinceLastPublish) / 1000);
-
-      if (timeSinceLastPublish < PUBLISH_COOLDOWN) {
-          statusEl.textContent = `Online (${source}) - Next Push in ${timeLeft}s`
-          return; 
-      }
-
-      statusEl.textContent = 'Publishing to Network...'
-      
-      const newJson = JSON.stringify(userList)
-      const newCid = await jsonStorage.add(newJson)
-      
-      await nameSystem.publish(sharedPeerId, newCid, {
-          key: SHARED_KEY_ALIAS
-      })
-      
-      lastPublishTime = Date.now();
-      console.log(`🚀 IPNS Record Announced! CID: ${newCid.toString()}`)
-      statusEl.textContent = 'Online & Synced'
-
-    } catch (e) {
-      console.error("Registry Loop Error:", e)
-      statusEl.textContent = 'Retrying...'
-    }
-  }
-
-  updateRegistry()
-  setInterval(updateRegistry, 20000)
 }
 
 function renderUserList(users) {
@@ -292,12 +377,12 @@ function renderUserList(users) {
   
   el.innerHTML = ''
   
-  const sorted = users.sort((a, b) => b.lastSeen - a.lastSeen)
+  // Sort alphabetically
+  const sorted = users.sort((a, b) => a.name.localeCompare(b.name))
   
   sorted.forEach(u => {
     const li = document.createElement('li')
-    const timeAgo = Math.floor((Date.now() - u.lastSeen) / 1000);
-    li.textContent = `${u.name} (Seen ${timeAgo}s ago)`
+    li.textContent = `${u.name}`
     el.appendChild(li)
   })
 }
