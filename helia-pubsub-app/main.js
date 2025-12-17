@@ -5,6 +5,7 @@ import { noise } from '@chainsafe/libp2p-noise'
 import { yamux } from '@chainsafe/libp2p-yamux'
 import { bootstrap } from '@libp2p/bootstrap'
 import { identify } from '@libp2p/identify'
+import { autoNAT } from '@libp2p/autonat'
 import { kadDHT } from '@libp2p/kad-dht'
 import { ping } from '@libp2p/ping'
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2' 
@@ -33,14 +34,15 @@ const KEYCHAIN_CONFIG = {
   }
 }
 
-// Robust Bootstrap List (Reliable Relay V2 Nodes)
+// 🟢 HIGH-QUALITY BOOTSTRAP LIST (Cloudflare + Protocol Labs)
 const BOOTSTRAP_NODES = [
+  '/dnsaddr/node-1.ingress.cloudflare-ipfs.com/p2p/QmcFf2FH3CEgTNHeMRGhN7HNHU1EXAxoEk6EFu9BJnmoWH',
+  '/dnsaddr/node-2.ingress.cloudflare-ipfs.com/p2p/QmcFoshkxXLnhNHrsbnjp8FpPs8nzcq9grXJfi6A9F78fk',
   '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
   '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb',
   '/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt',
-  '/dnsaddr/va1.bootstrap.libp2p.io/p2p/12D3KooWKnDdG3iXw9eTFijk3EWSunZcFi54Zka4wmtqtt6rPxc8',
-  '/dnsaddr/node-1.ingress.cloudflare-ipfs.com/p2p/QmcFf2FH3CEgTNHeMRGhN7HNHU1EXAxoEk6EFu9BJnmoWH',
-  '/dnsaddr/node-2.ingress.cloudflare-ipfs.com/p2p/QmcFoshkxXLnhNHrsbnjp8FpPs8nzcq9grXJfi6A9F78fk'
+  '/dnsaddr/ny5.bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
+  '/dnsaddr/sg1.bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt'
 ];
 
 async function startHelia(userName) {
@@ -57,25 +59,28 @@ async function startHelia(userName) {
     },
     transports: [ 
         webSockets(),
-        // 🟢 ENABLE CIRCUIT RELAY (Updated Config)
+        // 🟢 FORCE RELAY: Search for up to 3 relays
         circuitRelayTransport({ 
-            discoverRelays: 2 // Try to find at least 2 relays
+            discoverRelays: 3, 
         })
     ],
-    // 🟢 KEEP ALIVE: Force node to maintain connections
+    // 🟢 AGGRESSIVE CONNECTION MANAGER (User Requested)
     connectionManager: {
-        minConnections: 2
+        minConnections: 10,
+        maxConnections: 150, 
+        autoDial: true
     },
     connectionEncrypters: [ noise() ],
     streamMuxers: [ yamux() ],
     peerDiscovery: [ 
         bootstrap({ list: BOOTSTRAP_NODES }),
         pubsubPeerDiscovery({
-            interval: 10000,
+            interval: 5000, 
             listenOnly: false
         })
     ],
     services: {
+      autoNAT: autoNAT(),
       dcutr: dcutr(),
       dht: kadDHT({
         clientMode: true,
@@ -113,6 +118,14 @@ async function startHelia(userName) {
   // B. Create Helia
   const helia = await createHelia({ libp2p: libp2pConfig })
   
+  // 🟢 EXPOSE FOR DEBUGGING: Allows you to run the console diagnosis script
+  window.helia = helia;
+
+  // Listen for address changes (When relay sends us an address)
+  helia.libp2p.addEventListener('self:peer:update', (evt) => {
+      console.log('✨ My Multiaddrs Updated:', helia.libp2p.getMultiaddrs().map(ma => ma.toString()));
+  });
+  
   const nameSystem = ipns(helia)
   const jsonStorage = strings(helia)
   
@@ -124,40 +137,29 @@ async function startHelia(userName) {
   
   try {
     const myKeychain = helia.libp2p.services.keychain;
-    
-    // 1. Generate expected key from seed
     const seedBytes = fromString(SHARED_KEY_STRING, 'base64pad');
     const expectedKey = await generateKeyPairFromSeed('Ed25519', seedBytes);
     const expectedPeerId = peerIdFromPrivateKey(expectedKey);
     
-    // 2. Check if we have a key stored already
+    // Check existing
     const keys = await myKeychain.listKeys();
     const existingKeyRef = keys.find(k => k.name === SHARED_KEY_ALIAS);
 
     if (existingKeyRef) {
-        // 🟢 CRITICAL: Verify stored key matches seed
         const storedKey = await myKeychain.exportKey(SHARED_KEY_ALIAS);
         const storedPeerId = peerIdFromPrivateKey(storedKey);
-
         if (storedPeerId.toString() !== expectedPeerId.toString()) {
-            console.warn("⚠️ Stored key mismatch! Overwriting with correct Seed Key...");
+            console.warn("Overwriting key mismatch...");
             await myKeychain.removeKey(SHARED_KEY_ALIAS);
             await myKeychain.importKey(SHARED_KEY_ALIAS, expectedKey);
-        } else {
-            console.log("✅ Stored key verified (Matches Seed).");
         }
     } else {
-        console.log("🆕 Importing new shared key from seed...");
         await myKeychain.importKey(SHARED_KEY_ALIAS, expectedKey);
     }
 
-    // 3. Final Retrieve
     const finalKey = await myKeychain.exportKey(SHARED_KEY_ALIAS);
     sharedPeerId = peerIdFromPrivateKey(finalKey);
-    
-    if (finalKey.bytes) {
-        sharedPeerId.privateKey = finalKey.bytes
-    }
+    if (finalKey.bytes) sharedPeerId.privateKey = finalKey.bytes;
 
     console.log("--------------------------------------------------")
     console.log(`✅ SHARED REGISTRY ACTIVE`)
@@ -167,7 +169,7 @@ async function startHelia(userName) {
 
     document.getElementById('node-id').textContent = peerId
     document.getElementById('user-name').textContent = userName
-    document.getElementById('status').textContent = 'Connected (Scanning Registry...)'
+    document.getElementById('status').textContent = 'Connected'
 
     // Start Loops
     startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName, helia)
@@ -231,7 +233,6 @@ async function startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName
 
       try {
         console.log("🔍 [Debug] Resolving IPNS...");
-        
         const result = await nameSystem.resolve(sharedPeerId, { 
              signal: AbortSignal.timeout(60000) 
         });
@@ -249,13 +250,12 @@ async function startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName
 
       } catch (err) {
          console.warn("⚠️ [Debug] Resolve Failed:", err.message);
-         debugState.status = "Resolve Failed (Network empty or slow?)";
+         debugState.status = "Resolve Failed";
       }
 
       // --- STEP 2: MERGE ---
       if (remoteUsers.length > 0) {
           remoteUsers.forEach(user => {
-            // No timestamps, just names
             if (!knownUsers.has(user.name)) {
                 console.log(`👋 [Debug] Discovered new user: ${user.name}`);
                 knownUsers.set(user.name, { name: user.name });
@@ -263,13 +263,11 @@ async function startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName
           });
       }
 
-      // Add Self (Without Timestamp -> Persistent CID)
+      // Add Self
       knownUsers.set(userName, { name: userName });
-      
-      // Sort alphabetically to ensure JSON string is always identical
       const userList = Array.from(knownUsers.values()).sort((a, b) => a.name.localeCompare(b.name));
-      
       renderUserList(userList);
+      
       debugState.userCount = userList.length;
       updateDebugPanel(debugState);
 
@@ -297,13 +295,13 @@ async function startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName
       const newJson = JSON.stringify(userList);
       const newCid = await jsonStorage.add(newJson);
       
-      // Check if CID Changed
       if (debugState.cid === newCid.toString()) {
-           console.log("ℹ️ Content matches network. Publishing 'Liveness' update (re-signing same data).");
+           console.log("ℹ️ Content matches network. Publishing 'Liveness' update.");
       }
       
       console.log(`📤 [Debug] Publishing content CID: ${newCid}`);
       
+      // 🟢 MANUAL PROVIDE
       try {
         for await (const _ of helia.libp2p.services.dht.provide(newCid)) {} 
         console.log("📢 [Debug] Manually provided CID to DHT");
@@ -340,35 +338,43 @@ async function startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName
 }
 
 /**
- * 📊 MONITOR (Fixed to show actual Relay Status)
+ * 📊 MONITOR (WITH RELAY STATUS)
  */
 function startNetworkMonitor(helia) {
     const el = document.createElement('div');
     el.id = 'network-stats';
     el.style = "background: #eee; padding: 10px; margin-top: 10px; font-size: 12px; font-family: monospace;";
+    
+    // Add Refresh Button
+    const refreshBtn = document.createElement('button');
+    refreshBtn.textContent = "Check Reachability";
+    refreshBtn.style = "font-size: 10px; margin-left: 5px; cursor: pointer;";
+    refreshBtn.onclick = () => updateStats();
+    
     document.getElementById('app-container').appendChild(el);
+    el.appendChild(refreshBtn);
 
-    setInterval(() => {
+    const updateStats = () => {
         const peers = helia.libp2p.getPeers();
-        const connections = helia.libp2p.getConnections();
+        const myMultiaddrs = helia.libp2p.getMultiaddrs();
         
-        // Correct way to count relay connections
-        const relayConns = connections.filter(conn => 
-            conn.remoteAddr.toString().includes('circuit')
-        );
+        // Check if we have a relay address (contains /p2p-circuit)
+        const hasRelay = myMultiaddrs.some(ma => ma.toString().includes('/p2p-circuit'));
+        const relayAddress = hasRelay ? myMultiaddrs.find(ma => ma.toString().includes('/p2p-circuit')).toString() : "Searching...";
 
-        // Check if we are listening (have a multiaddr)
-        const multiaddrs = helia.libp2p.getMultiaddrs();
-        const isListening = multiaddrs.length > 0;
-        
         el.innerHTML = `
             <strong>Network Diagnostics:</strong><br>
             Connected Peers: ${peers.length}<br>
-            Relay Connections: ${relayConns.length}<br>
-            <strong>Public Status: ${isListening ? "🟢 Reachable (Listening)" : "🔴 Unreachable (NAT)"}</strong><br>
-            <em>(Your Address: ${isListening ? "Yes (via Relay)" : "None"})</em>
+            <strong>Public Reachability: ${hasRelay ? "<span style='color:green'>🟢 YES (Relay Active)</span>" : "<span style='color:red'>🔴 NO (NAT Blocked)</span>"}</strong><br>
+            <div style="margin-top:5px; font-size:10px; color:#666; word-break: break-all;">
+               My Address: ${relayAddress}
+            </div>
         `;
-    }, 2000);
+        el.appendChild(refreshBtn); 
+    };
+
+    setInterval(updateStats, 2000);
+    updateStats();
 }
 
 function renderUserList(users) {
@@ -377,7 +383,6 @@ function renderUserList(users) {
   
   el.innerHTML = ''
   
-  // Sort alphabetically
   const sorted = users.sort((a, b) => a.name.localeCompare(b.name))
   
   sorted.forEach(u => {

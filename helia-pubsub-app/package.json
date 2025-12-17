@@ -18,6 +18,7 @@
     "@helia/ipns": "^9.1.5",
     "@helia/strings": "^5.0.3",
     "@helia/unixfs": "^6.0.4",
+    "@libp2p/autonat": "^3.0.9",
     "@libp2p/circuit-relay-v2": "^4.1.2",
     "@libp2p/crypto": "^5.1.13",
     "@libp2p/dcutr": "^3.0.9",
