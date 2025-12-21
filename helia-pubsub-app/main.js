@@ -1,6 +1,7 @@
 import { createHelia } from 'helia'
 import { gossipsub } from '@chainsafe/libp2p-gossipsub'
 import { webSockets } from '@libp2p/websockets'
+import { webRTC } from '@libp2p/webrtc' // 🟢 ADDED: Required for browser-to-browser
 import { noise } from '@chainsafe/libp2p-noise'
 import { yamux } from '@chainsafe/libp2p-yamux'
 import { bootstrap } from '@libp2p/bootstrap'
@@ -18,7 +19,7 @@ import { fromString } from 'uint8arrays/from-string'
 import { keychain } from '@libp2p/keychain'
 import { peerIdFromPrivateKey } from '@libp2p/peer-id'
 import { pubsubPeerDiscovery } from '@libp2p/pubsub-peer-discovery'
-
+import { multiaddr } from '@multiformats/multiaddr'
 // --- CONFIGURATION ---
 
 const SHARED_KEY_STRING = 'TL+0YBiCedGwobNXEIr47PEIN0/HmUHtwYK9x4W1mjg=' 
@@ -34,16 +35,13 @@ const KEYCHAIN_CONFIG = {
   }
 }
 
-// 🟢 HIGH-QUALITY BOOTSTRAP LIST (Cloudflare + Protocol Labs)
+// 🟢 UPDATED BOOTSTRAP LIST (Use DNS4/Localhost)
 const BOOTSTRAP_NODES = [
-  '/dnsaddr/node-1.ingress.cloudflare-ipfs.com/p2p/QmcFf2FH3CEgTNHeMRGhN7HNHU1EXAxoEk6EFu9BJnmoWH',
-  '/dnsaddr/node-2.ingress.cloudflare-ipfs.com/p2p/QmcFoshkxXLnhNHrsbnjp8FpPs8nzcq9grXJfi6A9F78fk',
-  '/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN',
-  '/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb',
-  '/dnsaddr/bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt',
-  '/dnsaddr/ny5.bootstrap.libp2p.io/p2p/QmQCU2EcMqAqQPR2i9bChDtGNJchTbq5TbXJJ16u19uLTa',
-  '/dnsaddr/sg1.bootstrap.libp2p.io/p2p/QmcZf59bWwK5XFi76CZX8cbJ4BhTzzA3gU1ZjYZcYW3dwt'
+  // Change /ip4/127.0.0.1 -> /dns4/localhost
+  '/dns4/localhost/tcp/4003/ws/p2p/12D3KooWHfaPoCXGFy6J9QUv7pDqv5QWea1ikfbwUgCt1B1ebETy'
 ];
+
+const allowAll = () => true
 
 async function startHelia(userName) {
   
@@ -53,21 +51,28 @@ async function startHelia(userName) {
   }
 
   // A. Libp2p Configuration
-  const libp2pConfig = {
+// --- A. Libp2p Configuration (FIXED) ---
+const libp2pConfig = {
+    connectionGater: {
+      denyDialMultiaddr: () => false,
+    },
+
     addresses: { 
-        listen: [] 
+        listen: ['/webrtc'] 
     },
     transports: [ 
-        webSockets(),
-        // 🟢 FORCE RELAY: Search for up to 3 relays
+        // 🟢 FIX: Manually allow all WebSocket connections (Secure & Insecure)
+        webSockets({
+            filter: () => true 
+        }),
+        webRTC(), 
         circuitRelayTransport({ 
             discoverRelays: 3, 
         })
     ],
-    // 🟢 AGGRESSIVE CONNECTION MANAGER (User Requested)
+    // 🟢 Aggressive Connection Manager to keep the relay alive
     connectionManager: {
-        minConnections: 10,
-        maxConnections: 150, 
+        minConnections: 1, 
         autoDial: true
     },
     connectionEncrypters: [ noise() ],
@@ -117,11 +122,26 @@ async function startHelia(userName) {
 
   // B. Create Helia
   const helia = await createHelia({ libp2p: libp2pConfig })
+
+// 🟢 🔍 DEBUG: FORCE DIAL THE RELAY (FIXED)
+  try {
+      console.log("🔨 Attempting Manual Dial to Relay...");
+      const targetStr = BOOTSTRAP_NODES[0];
+      
+      // Convert string to Multiaddr object using the import
+      const ma = multiaddr(targetStr);
+      
+      const connection = await helia.libp2p.dial(ma);
+      console.log("✅ MANUAL DIAL SUCCESS!", connection);
+  } catch (err) {
+      console.error("❌ MANUAL DIAL FAILED:", err);
+      // This will now print the REAL network error (e.g. 'connection refused', 'protocol mismatch')
+      if (err.cause) console.error("👉 CAUSE:", err.cause); 
+  }
   
-  // 🟢 EXPOSE FOR DEBUGGING: Allows you to run the console diagnosis script
+  // 🟢 EXPOSE FOR DEBUGGING
   window.helia = helia;
 
-  // Listen for address changes (When relay sends us an address)
   helia.libp2p.addEventListener('self:peer:update', (evt) => {
       console.log('✨ My Multiaddrs Updated:', helia.libp2p.getMultiaddrs().map(ma => ma.toString()));
   });
@@ -205,36 +225,56 @@ Last Action: ${info.status || 'Idle'}
 }
 
 /**
- * 🔄 MAIN REGISTRY LOOP
+ * 🔄 MAIN REGISTRY LOOP (Fixed: No Overlaps + Connection Check)
  */
 async function startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName, helia) {
   
   let lastPublishTime = 0;
   const PUBLISH_COOLDOWN = 60 * 1000; 
   let knownUsers = new Map();
+  let isRunning = false; // 🔒 LOCK to prevent overlapping loops
   
   let debugState = {
       peerId: sharedPeerId.toString().slice(-8), 
-      cid: "Not resolved yet",
-      seq: "N/A",
+      cid: "...",
+      seq: "...",
       userCount: 0,
       status: "Initializing..."
   };
 
   const updateRegistry = async () => {
-    const statusEl = document.getElementById('status');
-    debugState.status = "1. Resolving IPNS...";
-    updateDebugPanel(debugState);
+    // 🔒 1. STOP if already running
+    if (isRunning) {
+        console.log("⏳ [Debug] Loop skipped (Previous run still active)");
+        return;
+    }
+    isRunning = true; // Lock
 
+    const statusEl = document.getElementById('status');
+    
     try {
+      // 🛑 2. CHECK CONNECTION before doing anything
+      const connectedPeers = helia.libp2p.getPeers();
+      if (connectedPeers.length === 0) {
+          debugState.status = "🔴 Waiting for Connection...";
+          updateDebugPanel(debugState);
+          console.log("⚠️ [Debug] No peers connected. Skipping registry update.");
+          isRunning = false; // Unlock
+          return;
+      }
+
+      debugState.status = "1. Resolving IPNS...";
+      updateDebugPanel(debugState);
+
       // --- STEP 1: RESOLVE ---
       let remoteUsers = [];
       let source = "None";
 
       try {
-        console.log("🔍 [Debug] Resolving IPNS...");
+        console.log("🔍 [Debug] Resolving IPNS (Timeout: 10s)...");
+        // Fast timeout to detect "First Run"
         const result = await nameSystem.resolve(sharedPeerId, { 
-             signal: AbortSignal.timeout(60000) 
+             signal: AbortSignal.timeout(10000) 
         });
 
         debugState.cid = result.cid.toString();
@@ -244,27 +284,20 @@ async function startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName
         const jsonStr = await jsonStorage.get(result.cid);
         remoteUsers = JSON.parse(jsonStr);
         source = "DHT";
-        
-        console.log(`✅ [Debug] Resolved CID: ${result.cid.toString()} | Users: ${remoteUsers.length}`);
-        debugState.seq = "(Resolved)"; 
+        console.log(`✅ [Debug] Resolved! Users found: ${remoteUsers.length}`);
 
       } catch (err) {
-         console.warn("⚠️ [Debug] Resolve Failed:", err.message);
-         debugState.status = "Resolve Failed";
+         console.warn("⚠️ [Debug] Resolve Failed (Likely First Run):", err.message);
+         debugState.status = "Record Not Found (Will Create New)";
+         remoteUsers = []; 
       }
 
       // --- STEP 2: MERGE ---
-      if (remoteUsers.length > 0) {
-          remoteUsers.forEach(user => {
-            if (!knownUsers.has(user.name)) {
-                console.log(`👋 [Debug] Discovered new user: ${user.name}`);
-                knownUsers.set(user.name, { name: user.name });
-            }
-          });
-      }
+      remoteUsers.forEach(user => {
+        if (!knownUsers.has(user.name)) knownUsers.set(user.name, { name: user.name });
+      });
+      knownUsers.set(userName, { name: userName }); // Add Self
 
-      // Add Self
-      knownUsers.set(userName, { name: userName });
       const userList = Array.from(knownUsers.values()).sort((a, b) => a.name.localeCompare(b.name));
       renderUserList(userList);
       
@@ -274,67 +307,64 @@ async function startRegistryLoop(nameSystem, jsonStorage, sharedPeerId, userName
       // --- STEP 3: PUBLISH DECISION ---
       const timeSinceLastPublish = Date.now() - lastPublishTime;
       
-      if (source === "None" && userList.length > 1) {
-          debugState.status = "🛑 Publish Skipped (Unsynced)";
+      // If we found data (source !== None), respect cooldown. 
+      // If we found NOTHING (First Run), we MUST publish immediately.
+      if (source !== "None" && timeSinceLastPublish < PUBLISH_COOLDOWN) {
+          debugState.status = "Idle (Synced)";
           updateDebugPanel(debugState);
-          return;
-      }
-
-      if (timeSinceLastPublish < PUBLISH_COOLDOWN) {
-          const timeLeft = Math.ceil((PUBLISH_COOLDOWN - timeSinceLastPublish) / 1000);
-          debugState.status = `Idle (Cooldown: ${timeLeft}s)`;
-          updateDebugPanel(debugState);
+          isRunning = false; // Unlock
           return;
       }
 
       // --- STEP 4: PUBLISH ---
       debugState.status = "3. Publishing...";
       updateDebugPanel(debugState);
-      statusEl.textContent = 'Publishing to Network...';
+      statusEl.textContent = 'Publishing...';
       
       const newJson = JSON.stringify(userList);
       const newCid = await jsonStorage.add(newJson);
+      console.log(`📤 [Debug] Publishing CID: ${newCid}`);
       
-      if (debugState.cid === newCid.toString()) {
-           console.log("ℹ️ Content matches network. Publishing 'Liveness' update.");
-      }
-      
-      console.log(`📤 [Debug] Publishing content CID: ${newCid}`);
-      
-      // 🟢 MANUAL PROVIDE
+      // Manually provide to DHT first
       try {
         for await (const _ of helia.libp2p.services.dht.provide(newCid)) {} 
-        console.log("📢 [Debug] Manually provided CID to DHT");
       } catch (e) {}
 
+  // 🟢 PUBLISH WITH TIMEOUT
       const publishResult = await nameSystem.publish(sharedPeerId, newCid, {
           key: SHARED_KEY_ALIAS,
-          signal: AbortSignal.timeout(90000) 
+          signal: AbortSignal.timeout(20000) 
       });
       
-      if (publishResult && publishResult.sequence) {
-          debugState.seq = publishResult.sequence.toString();
-          console.log(`🚀 [Debug] Publish Success! Seq: ${publishResult.sequence}`);
-      } else {
-           debugState.seq = "Published (Unknown Seq)";
-      }
+      // 🟢 FIX: Handle cases where 'sequence' is missing in the return object
+      // This prevents the "undefined" crash.
+      console.log("📦 Publish Result Object:", publishResult); // Let's see what it actually returns!
       
+      if (publishResult && publishResult.sequence !== undefined) {
+          debugState.seq = publishResult.sequence.toString();
+      } else {
+          debugState.seq = "Updated"; // Fallback text
+      }
+
       lastPublishTime = Date.now();
-      debugState.status = "✅ Synced & Published";
-      debugState.cid = newCid.toString();
+      debugState.status = "✅ Success";
+      console.log(`🚀 [Debug] Publish Confirmed!`);
+      
       updateDebugPanel(debugState);
       statusEl.textContent = 'Online & Synced';
 
     } catch (e) {
-      console.error("❌ Registry Loop Critical Error:", e);
+      console.error("❌ Error in Registry Loop:", e.message);
       debugState.status = `Error: ${e.message}`;
       updateDebugPanel(debugState);
-      statusEl.textContent = 'Retrying...';
+    } finally {
+        isRunning = false; // 🔓 ALWAYS UNLOCK
     }
   }
 
+  // Run immediately, then every 15s
   updateRegistry();
-  setInterval(updateRegistry, 30000);
+  setInterval(updateRegistry, 15000);
 }
 
 /**

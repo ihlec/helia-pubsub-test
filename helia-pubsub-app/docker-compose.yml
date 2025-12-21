@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  relay:
+    image: ipfs/kubo:v0.29.0  # 🟢 Downgrading to a stable, known-working version
+    container_name: local-relay
+    ports:
+      - "4001:4001"
+      - "4001:4001/udp"
+      - "4002:4002"       # TCP (Server Peering)
+      - "4003:4003"       # WS (Browser Peering)
+    volumes:
+      - ./setup.sh:/setup.sh
+    entrypoint: ["/bin/sh", "/setup.sh"]
