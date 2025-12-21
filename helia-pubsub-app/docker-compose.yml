@@ -2,13 +2,17 @@ version: '3.8'
 
 services:
   relay:
-    image: ipfs/kubo:v0.29.0  # 🟢 Downgrading to a stable, known-working version
+    image: ipfs/kubo:latest  # 🟢 Upgraded to Latest
     container_name: local-relay
     ports:
       - "4001:4001"
       - "4001:4001/udp"
-      - "4002:4002"       # TCP (Server Peering)
-      - "4003:4003"       # WS (Browser Peering)
+      - "4002:4002"       # TCP Swarm (Server-to-Server)
+      - "4003:4003"       # 🟢 WebSocket Swarm (Browser-to-Server)
     volumes:
       - ./setup.sh:/setup.sh
+      - ipfs_data:/data/ipfs
     entrypoint: ["/bin/sh", "/setup.sh"]
+
+volumes:
+  ipfs_data:
