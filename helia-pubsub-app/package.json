@@ -25,6 +25,7 @@
     "@libp2p/dcutr": "^3.0.9",
     "@libp2p/delegated-content-routing": "^4.0.11",
     "@libp2p/delegated-peer-routing": "^4.0.14",
+    "@libp2p/floodsub": "^11.0.10",
     "@libp2p/identify": "^4.0.9",
     "@libp2p/kad-dht": "^16.1.2",
     "@libp2p/keychain": "^6.0.9",
