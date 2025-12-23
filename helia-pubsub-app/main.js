@@ -1,5 +1,5 @@
 import { createHelia } from 'helia'
-// 🟢 CHANGE 1: Import FloodSub instead of GossipSub
+// 🟢 CHANGE 1: Use FloodSub (More reliable for local relays)
 import { floodsub } from '@libp2p/floodsub'
 import { webSockets } from '@libp2p/websockets'
 import { webRTC } from '@libp2p/webrtc'
@@ -18,17 +18,22 @@ import { fromString } from 'uint8arrays/from-string'
 import { toString } from 'uint8arrays/to-string'
 import { MemoryBlockstore } from 'blockstore-core'
 import { MemoryDatastore } from 'datastore-core'
+import { strings } from '@helia/strings'
+import { ipns } from '@helia/ipns'
+import { CID } from 'multiformats/cid'
 
 // --- CONFIGURATION ---
 const RELAY_ADDR_ONLY = '/ip4/127.0.0.1/tcp/4003/ws';
-// ⚠️ CHECK YOUR LOGS FOR THE NEW ID (Updates every time you wipe Docker):
-const RELAY_PEER_ID = '12D3KooWAdgj2rq3ST3mRAkQ8HgvUTbdqa9uDphgMsehwBLb9ThU'; 
+// 🟢 CHANGE 2: YOUR NEW PEER ID (From the logs you just pasted)
+const RELAY_PEER_ID = '12D3KooWFw8F8JK7ZQXY1pspP64jeRbt31kZFjMG13WA1583KrFX'; 
 
 const FULL_RELAY_MA = `${RELAY_ADDR_ONLY}/p2p/${RELAY_PEER_ID}`;
 const PRESENCE_TOPIC = 'helia-presence-v1';
 
 const onlineUsers = new Map(); 
 let myName = "";
+let heliaStrings;
+let heliaIpns;
 
 const allowAll = () => true
 
@@ -37,7 +42,7 @@ async function startHelia(userName) {
   const statusEl = document.getElementById('status');
   statusEl.textContent = 'Generating Identity...';
 
-  // 1. Generate Identity (Restart Trick)
+  // 1. Generate Identity
   const tempHelia = await createHelia({
       blockstore: new MemoryBlockstore(),
       datastore: new MemoryDatastore(),
@@ -83,19 +88,19 @@ async function startHelia(userName) {
           dcutr: dcutr(), 
           ping: ping(),
           dht: kadDHT({ clientMode: true }),
-          // 🟢 CHANGE 2: USE FLOODSUB (Robust for simple relays)
+          // 🟢 CHANGE 3: Use FloodSub here
           pubsub: floodsub() 
         }
       }
   })
   window.helia = helia; 
+  heliaStrings = strings(helia);
+  heliaIpns = ipns(helia);
 
   try {
       await helia.libp2p.dial(multiaddr(FULL_RELAY_MA));
       statusEl.textContent = 'Online 🟢';
-      
       setupPubSub(helia, myRelayAddress);
-
   } catch (err) {
       console.error("❌ Connection failed:", err);
       statusEl.textContent = 'Connection Failed 🔴';
@@ -106,22 +111,16 @@ function setupPubSub(helia, myAddress) {
     const pubsub = helia.libp2p.services.pubsub;
     pubsub.subscribe(PRESENCE_TOPIC);
 
-    // MESSAGE HANDLER
-    pubsub.addEventListener('message', (evt) => {
+    pubsub.addEventListener('message', async (evt) => {
         if (evt.detail.topic !== PRESENCE_TOPIC) return;
         
         try {
             const payload = JSON.parse(toString(evt.detail.data));
             const remotePeerId = evt.detail.from.toString();
-            
-            // Ignore self
             if (remotePeerId === helia.libp2p.peerId.toString()) return;
 
-            // Handle Heartbeat (Presence)
             if (payload.type === 'heartbeat') {
                 handleHeartbeat(remotePeerId, payload.name);
-                
-                // Optional: Attempt to dial them directly (Mesh building)
                 if (payload.address) {
                     const conns = helia.libp2p.getConnections(evt.detail.from);
                     if (conns.length === 0) {
@@ -130,14 +129,18 @@ function setupPubSub(helia, myAddress) {
                 }
             }
 
-            // Handle Chat Message
-            if (payload.type === 'chat') {
-                appendChatMessage(payload.name, payload.text, false);
+            if (payload.type === 'chat-cid') {
+                const msgId = appendChatMessage(payload.name, `Received CID: ${payload.cid}... Fetching...`, false);
+                try {
+                    const content = await heliaStrings.get(CID.parse(payload.cid));
+                    updateChatMessage(msgId, payload.name, content, payload.cid, false);
+                } catch (fetchErr) {
+                    updateChatMessage(msgId, payload.name, `❌ Failed to fetch content`, payload.cid, false);
+                }
             }
-        } catch (e) {}
+        } catch (e) { console.error(e) }
     });
 
-    // Start Heartbeat Loop
     setInterval(() => {
         const msg = JSON.stringify({ 
             type: 'heartbeat',
@@ -145,8 +148,11 @@ function setupPubSub(helia, myAddress) {
             timestamp: Date.now(),
             address: myAddress 
         });
+        // Catch errors so we don't crash if disconnected temporarily
         pubsub.publish(PRESENCE_TOPIC, fromString(msg)).catch(() => {});
-    }, 1000); // 1s interval for faster discovery
+    }, 1000);
+    
+    setInterval(pruneOfflineUsers, 2000);
 }
 
 // --- UI HELPERS ---
@@ -155,20 +161,15 @@ function handleHeartbeat(id, name) {
     onlineUsers.set(id, { name: name, lastSeen: Date.now() });
     renderUserList();
 }
-
-function pruneOfflineUsers() {
+function pruneOfflineUsers() { 
     const now = Date.now();
     let changed = false;
     for (const [id, user] of onlineUsers.entries()) {
-        if (now - user.lastSeen > 5000) { // 5s timeout
-            onlineUsers.delete(id);
-            changed = true;
-        }
+        if (now - user.lastSeen > 5000) { onlineUsers.delete(id); changed = true; }
     }
     if (changed) renderUserList();
 }
-
-function renderUserList() {
+function renderUserList() { 
     const el = document.getElementById('online-users-list');
     if (!el) return;
     el.innerHTML = '';
@@ -178,26 +179,31 @@ function renderUserList() {
         el.appendChild(li);
     });
 }
-
 function appendChatMessage(sender, text, isMe) {
     const chatBox = document.getElementById('chat-messages'); 
     if (!chatBox) return;
-    
     const div = document.createElement('div');
+    const msgId = 'msg-' + Math.random().toString(36).substr(2, 9);
+    div.id = msgId;
     div.style.marginBottom = '5px';
-    div.style.padding = '5px';
+    div.style.padding = '8px';
     div.style.background = isMe ? '#e6f3ff' : '#f0f0f0';
     div.style.borderRadius = '5px';
     div.innerHTML = `<strong>${sender}:</strong> ${text}`;
-    
     chatBox.appendChild(div);
     chatBox.scrollTop = chatBox.scrollHeight;
+    return msgId;
+}
+function updateChatMessage(elementId, sender, text, cid, isMe) {
+    const div = document.getElementById(elementId);
+    if (!div) return;
+    div.innerHTML = `
+        <strong>${sender}:</strong> ${text} <br>
+        <small style="color:grey; font-size:0.7em;">CID: ${cid}</small>
+    `;
 }
 
-// --- INITIALIZATION & EVENTS ---
-
 document.addEventListener('DOMContentLoaded', () => {
-    // START BUTTON
     const startBtn = document.getElementById('start-helia');
     if (startBtn) {
         startBtn.onclick = async () => {
@@ -210,7 +216,6 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
-    // SEND MESSAGE BUTTON
     const sendBtn = document.getElementById('send-msg-btn');
     const msgInput = document.getElementById('msg-input');
     
@@ -219,17 +224,31 @@ document.addEventListener('DOMContentLoaded', () => {
             const text = msgInput.value.trim();
             if (!text || !window.helia) return;
             
-            const msg = JSON.stringify({
-                type: 'chat',
-                name: myName,
-                text: text
-            });
+            // 1. Create CID
+            const cid = await heliaStrings.add(text);
+            const cidString = cid.toString();
+            console.log("📝 Created CID:", cidString);
+
+            // 2. Publish Message
+            const msg = JSON.stringify({ type: 'chat-cid', name: myName, cid: cidString });
             
-            await window.helia.libp2p.services.pubsub.publish(PRESENCE_TOPIC, fromString(msg));
-            appendChatMessage("Me", text, true);
-            msgInput.value = '';
+            // 🟢 WRAP IN TRY/CATCH TO PREVENT CRASHES
+            try {
+                await window.helia.libp2p.services.pubsub.publish(PRESENCE_TOPIC, fromString(msg));
+                const msgId = appendChatMessage("Me", text, true);
+                updateChatMessage(msgId, "Me", text, cidString, true);
+                msgInput.value = '';
+                
+                // 3. IPNS Publish (Background)
+                console.log("⏳ Publishing IPNS...");
+                heliaIpns.publish(window.helia.libp2p.peerId, cid).then(() => {
+                     console.log("✅ IPNS Updated");
+                }).catch(console.error);
+                
+            } catch (err) {
+                console.error("Publish Error:", err);
+                alert("Could not send message yet. Wait for 'Online Users' to appear.");
+            }
         };
     }
-    
-    setInterval(pruneOfflineUsers, 2000);
 });

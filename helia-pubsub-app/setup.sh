@@ -1,6 +1,6 @@
 #!/bin/sh
 set -e
-echo "🔧 Forcing Configuration (v14 - Pubsub One-Shot)..."
+echo "🔧 Forcing Configuration (v15 - Stable Chat & IPNS)..."
 
 # 1. Initialize
 if [ ! -f /data/ipfs/config ]; then
@@ -14,14 +14,16 @@ ipfs config --json Addresses.Swarm '["/ip4/0.0.0.0/tcp/4001", "/ip4/0.0.0.0/udp/
 ipfs config --json Addresses.Announce '["/ip4/127.0.0.1/tcp/4003/ws"]'
 ipfs config --json Swarm.Transports.Network.Websocket true
 
-# 3. Enable Relay & Client
+# 3. QUIET SERVER (The Fix for Empty User Lists)
+# ENABLE the Service (so browsers can connect)
 ipfs config --json Swarm.RelayService.Enabled true
-ipfs config --json Swarm.RelayClient.Enabled true
+# DISABLE the Client (Stop wasting CPU on the public DHT)
+ipfs config --json Swarm.RelayClient.Enabled false
+# ENABLE AutoNAT (Required for Helia to verify itself)
 ipfs config --json AutoNAT.ServiceMode '"enabled"'
 
-# 4. 🟢 FIX: SET ENTIRE PUBSUB OBJECT
-# Instead of editing the key, we overwrite the whole section.
-# This bypasses the "key not found" error.
+# 4. PERMISSIVE SECURITY
+# Set the whole object at once to avoid "key not found" errors
 ipfs config --json Pubsub '{"StrictSignatureVerification": false}'
 
 # 5. Safety & Limits
@@ -34,7 +36,6 @@ ipfs config --json Swarm.RelayService.MaxCircuits 100000
 (
   echo "🔌 Waiting for daemon..."
   until ipfs id > /dev/null 2>&1; do sleep 1; done
-  
   echo "🔌 Subscribing to topics..."
   ipfs pubsub sub _peer-discovery._p2p._pubsub &
   ipfs pubsub sub helia-presence-v1 &
