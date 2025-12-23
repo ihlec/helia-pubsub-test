@@ -35,9 +35,15 @@ To test, open the application in **two browser tabs/windows**. After starting bo
 | **`gossipsub`** | The protocol used for broadcasting messages to the subscribed channel. |
 
 ### Known Issues:
-- Failed to reach nodes under browser NAT conditions.
-- host own relays
+- WS only right now, no WSS (needs DNS name)
+- create data incentive for relays
 - relays should mirror pinnes of user State
 - relays should require clients to pinn 10 random cids of the relays choice
-- browser clients need to provide one random CID every 30min or they get cut off. 
-- non pinning browser clients should get cut of
+- browser clients need to provide one random chunk of a CID every time they interact with the relay. 
+- failing to provide a chunk will get the browser clients cut off
+
+
+### Data Incentive Concept 
+Next thing I want to do is gatekeeping the relay access with an incentive. So the relay should have the numbers 1 to 100 stored as a CID. Every connecting browser must download a subset of CIDs to their storage and mirror them. The relay decides on 10 random CIDs that it assigns to the connecting browser. Every  interaction after initiated by the browser needs to include a chunk of one of the CIDs content. Again decided by the relay which at random which one it would be. This way the relay can outsource its redundancy and backup needs to the connecting browsers, while the connecting browsers gain connectivity. 
+
+the topic thoes not need to be secret. Anyone one could join it. The clue is that browser nodes cannot join it without a relay, due to their NAT conditions. Therefore the browser needs the relay service. The relay on the other hand does not want to provide this service for free and therefore sets a price on relay usage, and the price is proof of storage.
