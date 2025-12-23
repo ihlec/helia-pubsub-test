@@ -35,4 +35,9 @@ To test, open the application in **two browser tabs/windows**. After starting bo
 | **`gossipsub`** | The protocol used for broadcasting messages to the subscribed channel. |
 
 ### Known Issues:
-- Failed to reach nodes under certain NAT conditions.
+- Failed to reach nodes under browser NAT conditions.
+- host own relays
+- relays should mirror pinnes of user State
+- relays should require clients to pinn 10 random cids of the relays choice
+- browser clients need to provide one random CID every 30min or they get cut off. 
+- non pinning browser clients should get cut of

@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  relay:
+    image: ipfs/kubo:latest
+    container_name: local-relay
+    environment:
+      # 🟡 FORCE DEBUG LOGS: This will show us why the reservation is dropped
+      - GOLOG_LOG_LEVEL=error,relay=debug,autorelay=debug,resource-manager=debug
+    ports:
+      - "4001:4001"
+      - "4001:4001/udp"
+      - "4003:4003"
+    volumes:
+      - ./setup.sh:/setup.sh
+      - ipfs_data:/data/ipfs
+    entrypoint: ["/bin/sh", "/setup.sh"]
+
+volumes:
+  ipfs_data:
