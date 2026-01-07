@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "^2.1.0",
     "vite": "^7.2.4"
   },
   "dependencies": {
@@ -39,6 +40,7 @@
     "@libp2p/tcp": "^11.0.9",
     "@libp2p/webrtc": "^6.0.10",
     "@libp2p/websockets": "^10.1.2",
+    "@libp2p/webtransport": "^6.0.11",
     "@libp2p/yamux": "^8.0.1",
     "@multiformats/multiaddr": "^13.0.1",
     "blockstore-core": "^6.1.1",
